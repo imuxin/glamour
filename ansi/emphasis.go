@@ -32,7 +32,8 @@ func (e *EmphasisElement) StyleOverrideRender(w io.Writer, ctx RenderContext, st
 
 func (e *EmphasisElement) doRender(w io.Writer, ctx RenderContext, style StylePrimitive) error {
 	for _, child := range e.Children {
-		if r, ok := child.(StyleOverriderElementRenderer); ok {
+		_, gated := child.(inlineLinkStyleOverrider)
+		if r, ok := child.(StyleOverriderElementRenderer); ok && (!gated || ctx.options.HyperlinkMode == HyperlinkModeInline) {
 			if err := r.StyleOverrideRender(w, ctx, style); err != nil {
 				return fmt.Errorf("glamour: error rendering with style: %w", err)
 			}

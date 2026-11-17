@@ -23,6 +23,10 @@ type StyleOverriderElementRenderer interface {
 	StyleOverrideRender(w io.Writer, ctx RenderContext, style StylePrimitive) error
 }
 
+type inlineLinkStyleOverrider interface {
+	isInlineLinkStyleOverrider()
+}
+
 // ElementFinisher is called when leaving a markdown node.
 type ElementFinisher interface {
 	Finish(w io.Writer, ctx RenderContext) error
@@ -221,6 +225,24 @@ func (tr *ANSIRenderer) NewElement(node ast.Node, source []byte) Element {
 	// Links
 	case ast.KindLink:
 		n := node.(*ast.Link)
+		if ctx.options.HyperlinkMode == HyperlinkModeInline {
+			var children []ElementRenderer
+			for nn := n.FirstChild(); nn != nil; nn = nn.NextSibling() {
+				if r := tr.NewElement(nn, source).Renderer; r != nil {
+					children = append(children, r)
+				}
+			}
+			return Element{
+				Renderer: &LinkElement{
+					BaseURL:       ctx.options.BaseURL,
+					URL:           string(n.Destination),
+					Children:      children,
+					SkipHref:      true,
+					FallbackToURL: true,
+				},
+			}
+		}
+
 		isFooterLinks := !ctx.options.InlineTableLinks && isInsideTable(node)
 
 		var children []ElementRenderer
