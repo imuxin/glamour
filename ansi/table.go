@@ -177,7 +177,8 @@ func (e *TableCellElement) Render(_ io.Writer, ctx RenderContext) error {
 	var b bytes.Buffer
 	style := ctx.options.Styles.Table.StylePrimitive
 	for _, child := range e.Children {
-		if r, ok := child.(StyleOverriderElementRenderer); ok {
+		_, gated := child.(inlineLinkStyleOverrider)
+		if r, ok := child.(StyleOverriderElementRenderer); ok && (!gated || ctx.options.HyperlinkMode == HyperlinkModeInline) {
 			if err := r.StyleOverrideRender(&b, ctx, style); err != nil {
 				return fmt.Errorf("glamour: error rendering with style: %w", err)
 			}

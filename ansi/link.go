@@ -6,17 +6,19 @@ import (
 	"hash/fnv"
 	"io"
 	"net/url"
+	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 )
 
 // A LinkElement is used to render hyperlinks.
 type LinkElement struct {
-	BaseURL  string
-	URL      string
-	Children []ElementRenderer
-	SkipText bool
-	SkipHref bool
+	BaseURL       string
+	URL           string
+	Children      []ElementRenderer
+	SkipText      bool
+	SkipHref      bool
+	FallbackToURL bool
 
 	hyperlink, resetHyperlink string
 	validURL                  bool
@@ -24,40 +26,78 @@ type LinkElement struct {
 
 // Render renders a LinkElement.
 func (e *LinkElement) Render(w io.Writer, ctx RenderContext) error {
+	return e.renderWithStyles(w, ctx, ctx.options.Styles.LinkText, ctx.options.Styles.Link)
+}
+
+// StyleOverrideRender renders a LinkElement while inheriting outer visual styles
+// such as surrounding bold/italic emphasis.
+func (e *LinkElement) StyleOverrideRender(w io.Writer, ctx RenderContext, style StylePrimitive) error {
+	textStyle := cascadeStylePrimitive(style, ctx.options.Styles.LinkText, false)
+	hrefStyle := cascadeStylePrimitive(style, ctx.options.Styles.Link, false)
+	return e.renderWithStyles(w, ctx, textStyle, hrefStyle)
+}
+
+func (*LinkElement) isInlineLinkStyleOverrider() {}
+
+func (e *LinkElement) renderWithStyles(w io.Writer, ctx RenderContext, textStyle, hrefStyle StylePrimitive) error {
 	// Make OSC 8 hyperlink token.
 	link := resolveRelativeURL(e.BaseURL, e.URL)
 	e.hyperlink, e.resetHyperlink, e.validURL = makeHyperlink(link)
-
-	// When inline hyperlinks are enabled and the URL is valid, render only
-	// the link text (underlined, hyperlinked) and hide the URL.
 	inline := ctx.options.HyperlinkMode == HyperlinkModeInline && e.validURL && !e.SkipText
+	if inline {
+		underline := true
+		textStyle.Underline = &underline
+	}
 
-	if err := e.renderTextPart(w, ctx, inline); err != nil {
-		return err
+	if !e.SkipText {
+		if e.FallbackToURL {
+			var textBuf bytes.Buffer
+			if err := e.renderTextPart(&textBuf, ctx, textStyle); err != nil {
+				return err
+			}
+			if strings.TrimSpace(ansi.Strip(textBuf.String())) != "" {
+				if _, err := io.WriteString(w, textBuf.String()); err != nil {
+					return fmt.Errorf("glamour: error writing hyperlink text: %w", err)
+				}
+			} else if resolved := strings.TrimSpace(link); resolved != "" {
+				var fb bytes.Buffer
+				el := &BaseElement{
+					Token: resolved,
+					Style: hrefStyle,
+				}
+				if err := el.Render(&fb, ctx); err != nil {
+					return err
+				}
+				if _, err := io.WriteString(w, e.hyperlink+fb.String()+e.resetHyperlink); err != nil {
+					return fmt.Errorf("glamour: error writing fallback hyperlink: %w", err)
+				}
+				return nil
+			} else if textBuf.Len() > 0 {
+				if _, err := io.WriteString(w, textBuf.String()); err != nil {
+					return fmt.Errorf("glamour: error writing hyperlink text: %w", err)
+				}
+			}
+		} else if err := e.renderTextPart(w, ctx, textStyle); err != nil {
+			return err
+		}
 	}
 	if !inline && !e.SkipHref {
-		if err := e.renderHrefPart(w, ctx, link); err != nil {
+		if err := e.renderHrefPart(w, ctx, hrefStyle, link); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *LinkElement) renderTextPart(w io.Writer, ctx RenderContext, inline bool) error {
-	style := ctx.options.Styles.LinkText
-	if inline {
-		underline := true
-		style.Underline = &underline
-	}
-
-	if e.SkipText {
-		return nil
-	}
-
+func (e *LinkElement) renderTextPart(w io.Writer, ctx RenderContext, textStyle StylePrimitive) error {
 	for _, child := range e.Children {
-		if r, ok := child.(StyleOverriderElementRenderer); ok { //nolint:nestif
+		if child == nil {
+			continue
+		}
+		_, gated := child.(inlineLinkStyleOverrider)
+		if r, ok := child.(StyleOverriderElementRenderer); ok && (!gated || ctx.options.HyperlinkMode == HyperlinkModeInline) { //nolint:nestif
 			var b bytes.Buffer
-			if err := r.StyleOverrideRender(&b, ctx, style); err != nil {
+			if err := r.StyleOverrideRender(&b, ctx, textStyle); err != nil {
 				return fmt.Errorf("glamour: error rendering with style: %w", err)
 			}
 
@@ -73,7 +113,7 @@ func (e *LinkElement) renderTextPart(w io.Writer, ctx RenderContext, inline bool
 			token := e.hyperlink + b.String() + e.resetHyperlink
 			el := &BaseElement{
 				Token: token,
-				Style: style,
+				Style: textStyle,
 			}
 			if err := el.Render(w, ctx); err != nil {
 				return fmt.Errorf("glamour: error rendering: %w", err)
@@ -83,7 +123,7 @@ func (e *LinkElement) renderTextPart(w io.Writer, ctx RenderContext, inline bool
 	return nil
 }
 
-func (e *LinkElement) renderHrefPart(w io.Writer, ctx RenderContext, link string) error {
+func (e *LinkElement) renderHrefPart(w io.Writer, ctx RenderContext, hrefStyle StylePrimitive, link string) error {
 	prefix := ""
 	if !e.SkipText {
 		prefix = " "
@@ -94,7 +134,7 @@ func (e *LinkElement) renderHrefPart(w io.Writer, ctx RenderContext, link string
 		el := &BaseElement{
 			Token:  token,
 			Prefix: prefix,
-			Style:  ctx.options.Styles.Link,
+			Style:  hrefStyle,
 		}
 		if err := el.Render(w, ctx); err != nil {
 			return err
