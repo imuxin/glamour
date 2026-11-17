@@ -156,6 +156,9 @@ func (e *TableElement) collectLinksAndImages(ctx RenderContext) error {
 			}
 			images = append(images, image)
 		case *ast.Link:
+			if ctx.options.HyperlinkMode == HyperlinkModeInline {
+				break
+			}
 			content, err := nodeContent(node, e.source)
 			if err != nil {
 				return ast.WalkStop, err
