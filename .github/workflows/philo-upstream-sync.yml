@@ -1,0 +1,83 @@
+name: Philo upstream sync
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: philo-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    if: github.repository == 'imuxin/glamour'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: philo
+          fetch-depth: 0
+      - name: Rebase onto upstream main
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/charmbracelet/glamour.git
+          git fetch --no-tags upstream main
+          old_head=$(git rev-parse HEAD)
+          echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'Already contains upstream/main; no update needed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git rebase upstream/main; then
+            {
+              echo '### Rebase conflict — philo was not updated'
+              echo 'Resolve the rebase locally using the instructions in PHILO_FORK.md.'
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git rebase --abort
+            exit 1
+          fi
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        if: steps.rebase.outputs.changed == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate rebased code
+        if: steps.rebase.outputs.changed == 'true'
+        run: |
+          go test -race ./... -timeout=120s
+          go vet ./...
+          git diff --exit-code
+      - name: Preserve previous revision and publish tested rebase
+        if: steps.rebase.outputs.changed == 'true'
+        env:
+          OLD_HEAD: ${{ steps.rebase.outputs.old_head }}
+        run: |
+          set -eu
+          # Retain the previous history for rollback and commit-pinned consumers.
+          backup_ref="refs/tags/philo-history/$OLD_HEAD"
+          git update-ref "$backup_ref" "$OLD_HEAD"
+          git push --atomic --force-with-lease="refs/heads/philo:$OLD_HEAD" origin \
+            HEAD:refs/heads/philo "$backup_ref:$backup_ref"
+          {
+            echo '### Upstream sync complete'
+            echo "Previous revision: $OLD_HEAD"
+            echo "New revision: $(git rev-parse HEAD)"
+            echo 'Philo application dependency pins were not changed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report failure
+        if: failure()
+        run: echo 'Sync failed. Check the failing step; no untested rebase is published. Existing release tags remain unchanged.' >> "$GITHUB_STEP_SUMMARY"
