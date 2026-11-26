@@ -91,6 +91,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: ${{ runner.temp }}/philo-sync
+          merge-multiple: true
       - name: Check out the exact candidate
         env:
           NEW_HEAD: ${{ needs.prepare.outputs.new_head }}
@@ -128,6 +129,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: ${{ runner.temp }}/philo-sync
+          merge-multiple: true
       - name: Preserve previous revision and publish tested rebase
         env:
           OLD_HEAD: ${{ needs.prepare.outputs.old_head }}
