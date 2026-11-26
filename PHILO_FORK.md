@@ -37,14 +37,20 @@ Philo repository.
 manual dispatch. GitHub schedules may be delayed, and GitHub can disable schedules
 on inactive public forks after 60 days; check Actions if updates stop.
 
-The workflow fetches upstream `main`, rebases `philo`, runs `go test -race ./...`
-and `go vet ./...`, and only then pushes with an explicit `--force-with-lease`.
-Conflicts and failed checks leave the remote branch unchanged. Inspect the failed
+The workflow fetches upstream `main` and prepares a rebased candidate. If the
+candidate changes `.github/workflows/` in the resulting tree or in new
+upstream commits, it lists the affected files and stops for manual review.
+Otherwise, a read-only job validates the exact candidate with `go test -race
+./...` and `go vet ./...`. A separate job pushes that same commit with an
+explicit `--force-with-lease` without executing the candidate. Conflicts and
+failed checks leave the remote branch unchanged. Inspect the failed
 Actions run and summary; the workflow does not create issues or send custom
 notifications. GitHub's own workflow notification settings still apply.
 
-No PAT or custom secret is required: the workflow uses `GITHUB_TOKEN` with
-`contents: write`. Only the synchronization workflow needs write permission.
+No PAT or custom secret is required for automatic sync: only the publish job
+gives `GITHUB_TOKEN` `contents: write`. The built-in token cannot update
+workflow files. For a manual sync that touches workflows, review the incoming
+workflow changes first and use a maintainer credential authorized to push them.
 Inherited upstream release/coverage/config-sync workflows are disabled in this
 fork's Actions settings because they require upstream services or credentials.
 The fork's own CI tests normal pushes and pull requests. The sync job tests its
@@ -62,6 +68,8 @@ git switch -c resolve-upstream origin/philo
 old_head=$(git rev-parse HEAD)
 git rebase upstream/main
 # Resolve conflicts, git add the resolved files, then git rebase --continue.
+git diff "$old_head" HEAD -- .github/workflows/
+git log --full-history -m -p "$old_head..upstream/main" -- .github/workflows/
 go test -race ./... -timeout=120s
 go vet ./...
 git tag "philo-history/$old_head" "$old_head"
