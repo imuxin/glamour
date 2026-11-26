@@ -72,22 +72,26 @@ func (e *TableElement) Render(w io.Writer, ctx RenderContext) error {
 	return nil
 }
 
-func (e *TableElement) setStyles(ctx RenderContext) {
-	docRules := ctx.options.Styles.Document
-	if docRules.BackgroundColor != nil {
-		baseStyle := lipgloss.NewStyle().Background(lipgloss.Color(*docRules.BackgroundColor))
-		ctx.table.lipgloss.BaseStyle(baseStyle)
+func (e *TableElement) isGrid(ctx RenderContext) bool {
+	return ctx.options.Styles.Table.Grid != nil && *ctx.options.Styles.Table.Grid
+}
+
+func (e *TableElement) isFitContent(ctx RenderContext) bool {
+	return ctx.options.Styles.Table.FitContent != nil && *ctx.options.Styles.Table.FitContent
+}
+
+func (e *TableElement) cellStyle(ctx RenderContext, col, cellMargin int) lipgloss.Style {
+	st := lipgloss.NewStyle().Inline(false)
+	// Default horizontal margin unless squeezed out by an ultra-narrow viewport.
+	if cellMargin > 0 {
+		st = st.Margin(0, cellMargin)
 	}
 
-	ctx.table.lipgloss = ctx.table.lipgloss.StyleFunc(func(_, col int) lipgloss.Style {
-		st := lipgloss.NewStyle().Inline(false)
-		// Default Styles
-		st = st.Margin(0, 1)
-
-		// Override with custom styles
-		if m := ctx.options.Styles.Table.Margin; m != nil {
-			st = st.Padding(0, int(*m))
-		}
+	// Override with custom styles
+	if m := ctx.options.Styles.Table.Margin; m != nil {
+		st = st.Padding(0, int(*m))
+	}
+	if col < len(e.table.Alignments) {
 		switch e.table.Alignments[col] {
 		case astext.AlignLeft:
 			st = st.Align(lipgloss.Left).PaddingRight(0)
@@ -98,16 +102,29 @@ func (e *TableElement) setStyles(ctx RenderContext) {
 		case astext.AlignNone:
 			// do nothing
 		}
+	}
 
-		return st
+	return st
+}
+
+func (e *TableElement) setStyles(ctx RenderContext, cellMargin int) {
+	docRules := ctx.options.Styles.Document
+	if docRules.BackgroundColor != nil {
+		baseStyle := lipgloss.NewStyle().Background(lipgloss.Color(*docRules.BackgroundColor))
+		ctx.table.lipgloss.BaseStyle(baseStyle)
+	}
+
+	ctx.table.lipgloss = ctx.table.lipgloss.StyleFunc(func(_, col int) lipgloss.Style {
+		return e.cellStyle(ctx, col, cellMargin)
 	})
 }
 
-func (e *TableElement) setBorders(ctx RenderContext) {
+func (e *TableElement) setBorders(ctx RenderContext, hasRows bool) {
 	rules := ctx.options.Styles.Table
 	border := lipgloss.NormalBorder()
+	grid := e.isGrid(ctx)
 
-	if rules.RowSeparator != nil && rules.ColumnSeparator != nil {
+	if !grid && rules.RowSeparator != nil && rules.ColumnSeparator != nil {
 		border = lipgloss.Border{
 			Top:    *rules.RowSeparator,
 			Bottom: *rules.RowSeparator,
@@ -117,10 +134,51 @@ func (e *TableElement) setBorders(ctx RenderContext) {
 		}
 	}
 	ctx.table.lipgloss.Border(border)
-	ctx.table.lipgloss.BorderTop(false)
-	ctx.table.lipgloss.BorderLeft(false)
-	ctx.table.lipgloss.BorderRight(false)
-	ctx.table.lipgloss.BorderBottom(false)
+	ctx.table.lipgloss.BorderTop(grid)
+	ctx.table.lipgloss.BorderLeft(grid)
+	ctx.table.lipgloss.BorderRight(grid)
+	ctx.table.lipgloss.BorderBottom(grid)
+	ctx.table.lipgloss.BorderRow(grid)
+	if grid && !hasRows {
+		ctx.table.lipgloss.BorderHeader(false)
+	}
+	if rules.BorderColor != nil && *rules.BorderColor != "" {
+		ctx.table.lipgloss.BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color(*rules.BorderColor)))
+	}
+}
+
+func (e *TableElement) tableMaxTotal(ctx RenderContext, t *table.Table, cols, cellMargin int) int {
+	headers := t.GetHeaders()
+	data := t.GetData()
+	rows := data.Rows()
+	maxTotal := 0
+	for col := range cols {
+		colMax := 0
+		if col < len(headers) {
+			colMax = max(colMax, lipgloss.Width(headers[col]))
+		}
+		for row := range rows {
+			colMax = max(colMax, lipgloss.Width(data.At(row, col)))
+		}
+		maxTotal += colMax + e.cellStyle(ctx, col, cellMargin).GetHorizontalFrameSize()
+	}
+	return maxTotal
+}
+
+func (e *TableElement) applySizing(ctx RenderContext, t *table.Table, availableWidth, cols, borderW, cellMargin int, grid, fitContent bool) {
+	if (!grid && !fitContent) || availableWidth <= 0 || cols == 0 {
+		return
+	}
+	if fitContent {
+		t.FitContent()
+	}
+	maxTotal := e.tableMaxTotal(ctx, t, cols, cellMargin)
+	if maxTotal <= availableWidth && maxTotal+borderW > availableWidth && maxTotal-1 > borderW {
+		// Lip Gloss resizer checks maxTotal() <= tableWidth without accounting
+		// for horizontal borders, which skips shrinking and clips the right
+		// border via MaxWidth. Nudge width below maxTotal to enter shrinking.
+		t.Width(maxTotal - 1)
+	}
 }
 
 // Finish finishes rendering a TableElement.
@@ -131,13 +189,34 @@ func (e *TableElement) Finish(_ io.Writer, ctx RenderContext) error {
 		ctx.table.tableLinks = nil
 	}()
 
-	rules := ctx.options.Styles.Table
+	t := ctx.table.lipgloss
+	if t == nil {
+		return nil
+	}
 
-	e.setStyles(ctx)
-	e.setBorders(ctx)
+	rules := ctx.options.Styles.Table
+	availableWidth := int(ctx.blockStack.Width(ctx))
+	cols := max(len(t.GetHeaders()), t.GetData().Columns())
+	hasRows := t.GetData().Rows() > 0
+	grid := e.isGrid(ctx)
+	fitContent := e.isFitContent(ctx)
+
+	borderW := max(cols-1, 0)
+	if grid && cols > 0 {
+		borderW = cols + 1
+	}
+
+	cellMargin := 1
+	if grid && availableWidth > 0 && cols > 0 && availableWidth < cols*3+borderW {
+		cellMargin = 0
+	}
+
+	e.setStyles(ctx, cellMargin)
+	e.setBorders(ctx, hasRows)
+	e.applySizing(ctx, t, availableWidth, cols, borderW, cellMargin, grid, fitContent)
 
 	ow := ctx.blockStack.Current().Block
-	if _, err := ow.WriteString(ctx.table.lipgloss.String()); err != nil {
+	if _, err := ow.WriteString(t.String()); err != nil {
 		return fmt.Errorf("glamour: error writing to buffer: %w", err)
 	}
 
@@ -176,6 +255,9 @@ func (e *TableHeadElement) Finish(_ io.Writer, ctx RenderContext) error {
 func (e *TableCellElement) Render(_ io.Writer, ctx RenderContext) error {
 	var b bytes.Buffer
 	style := ctx.options.Styles.Table.StylePrimitive
+	if e.Head {
+		style = cascadeStylePrimitive(style, ctx.options.Styles.Table.Header, true)
+	}
 	for _, child := range e.Children {
 		_, gated := child.(inlineLinkStyleOverrider)
 		if r, ok := child.(StyleOverriderElementRenderer); ok && (!gated || ctx.options.HyperlinkMode == HyperlinkModeInline) {
