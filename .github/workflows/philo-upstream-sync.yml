@@ -6,22 +6,27 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: philo-upstream-sync
   cancel-in-progress: false
 
 jobs:
-  rebase:
-    if: github.repository == 'imuxin/glamour'
+  prepare:
+    if: github.repository == 'imuxin/glamour' && github.ref == 'refs/heads/philo'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      old_head: ${{ steps.rebase.outputs.old_head }}
+      new_head: ${{ steps.rebase.outputs.new_head }}
+      artifact_id: ${{ steps.bundle.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: philo
           fetch-depth: 0
+          persist-credentials: false
       - name: Rebase onto upstream main
         id: rebase
         shell: bash
@@ -34,7 +39,6 @@ jobs:
           old_head=$(git rev-parse HEAD)
           echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
             echo 'Already contains upstream/main; no update needed.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -49,35 +53,97 @@ jobs:
             git rebase --abort
             exit 1
           fi
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v6
-        if: steps.rebase.outputs.changed == 'true'
+          # Check the resulting tree and incoming upstream history. Do not
+          # count downstream workflow commits merely replayed by rebase.
+          workflow_paths=$({
+            git diff --name-only --no-renames "$old_head" HEAD -- .github/workflows/
+            git log --full-history -m --format= --name-only --no-renames "$old_head..upstream/main" -- .github/workflows/
+          } | sed '/^$/d' | sort -u)
+          if [[ -n "$workflow_paths" ]]; then
+            {
+              echo '### Manual review needed: upstream changes GitHub Actions files'
+              printf '\n```\n%s\n```\n' "$workflow_paths"
+              echo 'No refs updated. Follow the reviewed manual sync in PHILO_FORK.md.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::error::Workflow changes must be reviewed and published manually.'
+            exit 1
+          fi
+          echo "new_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git branch philo-sync-candidate HEAD
+          git bundle create "$RUNNER_TEMP/philo-sync.bundle" refs/heads/philo-sync-candidate
+      - name: Upload candidate before running upstream code
+        id: bundle
+        if: steps.rebase.outputs.new_head != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Validate rebased code
-        if: steps.rebase.outputs.changed == 'true'
+          name: philo-sync-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/philo-sync.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: prepare
+    if: needs.prepare.outputs.new_head != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: ${{ runner.temp }}/philo-sync
+      - name: Check out the exact candidate
+        env:
+          NEW_HEAD: ${{ needs.prepare.outputs.new_head }}
         run: |
+          set -euo pipefail
+          git init candidate
+          git -C candidate fetch --no-tags "$RUNNER_TEMP/philo-sync/philo-sync.bundle" refs/heads/philo-sync-candidate
+          test "$(git -C candidate rev-parse FETCH_HEAD)" = "$NEW_HEAD"
+          git -C candidate checkout --detach "$NEW_HEAD"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: candidate/go.mod
+          cache: false
+      - name: Validate rebased code
+        working-directory: candidate
+        run: |
+          set -euo pipefail
           go test -race ./... -timeout=120s
           go vet ./...
           git diff --exit-code
+
+  publish:
+    needs: [prepare, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # This runner never checks out or executes the rebased candidate.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.old_head }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: ${{ runner.temp }}/philo-sync
       - name: Preserve previous revision and publish tested rebase
-        if: steps.rebase.outputs.changed == 'true'
         env:
-          OLD_HEAD: ${{ steps.rebase.outputs.old_head }}
+          OLD_HEAD: ${{ needs.prepare.outputs.old_head }}
+          NEW_HEAD: ${{ needs.prepare.outputs.new_head }}
         run: |
-          set -eu
-          # Retain the previous history for rollback and commit-pinned consumers.
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$OLD_HEAD"
+          git fetch --no-tags "$RUNNER_TEMP/philo-sync/philo-sync.bundle" refs/heads/philo-sync-candidate
+          test "$(git rev-parse FETCH_HEAD)" = "$NEW_HEAD"
           backup_ref="refs/tags/philo-history/$OLD_HEAD"
           git update-ref "$backup_ref" "$OLD_HEAD"
           git push --atomic --force-with-lease="refs/heads/philo:$OLD_HEAD" origin \
-            HEAD:refs/heads/philo "$backup_ref:$backup_ref"
+            "$NEW_HEAD:refs/heads/philo" "$backup_ref:$backup_ref"
           {
             echo '### Upstream sync complete'
             echo "Previous revision: $OLD_HEAD"
-            echo "New revision: $(git rev-parse HEAD)"
+            echo "New revision: $NEW_HEAD"
             echo 'Philo application dependency pins were not changed.'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Report failure
-        if: failure()
-        run: echo 'Sync failed. Check the failing step; no untested rebase is published. Existing release tags remain unchanged.' >> "$GITHUB_STEP_SUMMARY"
