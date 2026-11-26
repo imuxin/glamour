@@ -21,15 +21,18 @@ Use upstream `ansi.HyperlinkModeInline` / `glamour.WithHyperlinkMode`; the previ
 private `HideLinkURL` option is not carried forward.
 
 The patches add empty-description fallback, preserve nested emphasis and literal
-inline code, and render regular links in table cells without address footnotes.
-Bare URLs, email autolinks, and standalone images retain their existing behavior.
-The added regression tests live in `ansi/link_hide_url_test.go`.
+inline code, render regular links in table cells without address footnotes, and
+add opt-in table grid borders, border coloring, content-width sizing, and header
+cell styling on `ansi.StyleTable` (all disabled by default so upstream rendering
+remains unchanged). Bare URLs, email autolinks, and standalone images retain
+their existing behavior. The added regression tests live in
+`ansi/link_hide_url_test.go` and `ansi/table_grid_test.go`.
 
 Changes affect `ansi/link.go`, `codespan.go`, `elements.go`, `emphasis.go`,
-`table.go`, and `table_links.go`. Keep patches focused and remove them when
-upstream provides equivalent behavior. Preserve upstream tests and the MIT
-license. Philo-specific theme, viewport, and clipboard behavior belongs in the
-Philo repository.
+`style.go`, `table.go`, and `table_links.go`. Keep patches focused and remove
+them when upstream provides equivalent behavior. Preserve upstream tests and the
+MIT license. Philo-specific theme, viewport, and clipboard behavior belongs in
+the Philo repository.
 
 ## Automated upstream synchronization
 

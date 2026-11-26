@@ -88,9 +88,13 @@ type StyleList struct {
 // StyleTable holds the style settings for a table.
 type StyleTable struct {
 	StyleBlock
-	CenterSeparator *string `json:"center_separator,omitempty"`
-	ColumnSeparator *string `json:"column_separator,omitempty"`
-	RowSeparator    *string `json:"row_separator,omitempty"`
+	CenterSeparator *string        `json:"center_separator,omitempty"`
+	ColumnSeparator *string        `json:"column_separator,omitempty"`
+	RowSeparator    *string        `json:"row_separator,omitempty"`
+	Grid            *bool          `json:"grid,omitempty"`
+	FitContent      *bool          `json:"fit_content,omitempty"`
+	BorderColor     *string        `json:"border_color,omitempty"`
+	Header          StylePrimitive `json:"header,omitempty"`
 }
 
 // StyleConfig is used to configure the styling behavior of an ANSIRenderer.
