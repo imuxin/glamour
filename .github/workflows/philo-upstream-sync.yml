@@ -95,6 +95,7 @@ jobs:
       - name: Check out the exact candidate
         env:
           NEW_HEAD: ${{ needs.prepare.outputs.new_head }}
+          GIT_LFS_SKIP_SMUDGE: '1'
         run: |
           set -euo pipefail
           git init candidate
